@@ -20,7 +20,7 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Compila (senza firma: la firma la fa AltStore sul telefono)
+      - name: Compila senza firma (la firma la fa AltStore)
         working-directory: ios
         run: |
           xcodebuild -project Ritornello.xcodeproj -target Ritornello \
