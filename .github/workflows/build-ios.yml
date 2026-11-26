@@ -23,9 +23,9 @@ jobs:
       - name: Compila senza firma (la firma la fa AltStore)
         working-directory: ios
         run: |
-          xcodebuild -project Ritornello.xcodeproj -target Ritornello \
-            -configuration Release -sdk iphoneos \
-            SYMROOT="$PWD/build" \
+          xcodebuild -project Ritornello.xcodeproj -scheme Ritornello \
+            -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
+            -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 
@@ -33,7 +33,7 @@ jobs:
         working-directory: ios
         run: |
           mkdir -p Payload
-          cp -R build/Release-iphoneos/Ritornello.app Payload/
+          cp -R build/Build/Products/Release-iphoneos/Ritornello.app Payload/
           zip -qry Ritornello.ipa Payload
 
       - uses: actions/upload-artifact@v4
