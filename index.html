@@ -314,6 +314,7 @@ dialog::backdrop{background:var(--shade)}
   <div class="dlg-actions"><button class="btn" id="key-cancel">Chiudi</button><button class="btn primary" id="key-save">Salva chiave</button></div>
   <hr>
   <h3>Backup</h3>
+  <p class="muted" id="app-version"></p>
   <p>Brani, ritornelli e playlist restano solo su questo dispositivo. Copia il backup per spostarli su un altro telefono.</p>
   <div class="dlg-actions split" style="justify-content:flex-start"><button class="btn" id="bk-copy">Copia backup</button><button class="btn" id="bk-restore">Ripristina backup</button></div>
 </div></dialog>
@@ -656,19 +657,46 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3600);
 }
-function openSettings() { $('#key-input').value = D.apiKey || ''; $('#settings').showModal(); }
+function openSettings() {
+  $('#key-input').value = D.apiKey || '';
+  $('#app-version').textContent = window.__RITORNELLO_VERSION__
+    ? 'App installata: versione ' + window.__RITORNELLO_VERSION__ + (NATIVE ? ', lettore nativo attivo.' : ', lettore nativo non disponibile.')
+    : 'Stai usando il sito nel browser: a schermo bloccato la musica si ferma.';
+  $('#settings').showModal();
+}
 
 /* ---------- lettore YouTube ---------- */
 let hiddenAt = 0;
 // Dentro l'app iPhone l'audio lo suona il lettore nativo di iOS (funziona a schermo bloccato)
-const NATIVE = !!(window.__RITORNELLO_NATIVE__ && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ritornello);
+let NATIVE = !!(window.__RITORNELLO_NATIVE__ && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ritornello);
 function sendNative(msg) { if (!NATIVE) return; try { window.webkit.messageHandlers.ritornello.postMessage(Object.assign({ type: 'cmd' }, msg)); } catch (_) {} }
 function nativeItem(id) {
   const m = getMeta(id) || { id, title: 'Video ' + id };
   return { id, title: m.title || '', artist: m.channel || '', thumb: m.thumb || ('https://i.ytimg.com/vi/' + id + '/mqdefault.jpg'),
     start: hasChorus(m) ? m.start : null, end: hasChorus(m) ? m.end : null };
 }
+// Se il lettore nativo non risponde (app installata vecchia), torno al lettore di YouTube.
+let nativeAlive = false, nativeCheckT = null;
+function loadYouTubeAPI() {
+  if (window.YT && window.YT.Player) { window.onYouTubeIframeAPIReady(); return; }
+  const sc = document.createElement('script');
+  sc.src = 'https://www.youtube.com/iframe_api';
+  sc.onerror = () => toast('Non riesco a caricare il lettore di YouTube. Controlla la connessione.');
+  document.head.appendChild(sc);
+}
+function nativeFallback() {
+  if (!NATIVE || nativeAlive) return;
+  NATIVE = false; ytReady = false;
+  document.body.classList.remove('native');
+  $('#video-slot').style.backgroundImage = ''; $('#mini-vid').style.backgroundImage = '';
+  S.loading = false; S.playing = false;
+  pendingIdx = S.qi >= 0 ? S.qi : null;
+  loadYouTubeAPI();
+  toast('L’app installata è una versione vecchia: suono con il lettore di YouTube. Per l’ascolto a schermo bloccato installa la versione 1.1.');
+  afterStateChange();
+}
 window.ritornelloNativeState = st => {
+  if (NATIVE) { nativeAlive = true; clearTimeout(nativeCheckT); }
   if (!NATIVE || !st || typeof st.index !== 'number' || st.index < 0) return;
   const qi = S.queue.indexOf(st.id);
   if (qi >= 0) S.qi = qi;
@@ -678,6 +706,7 @@ window.ritornelloNativeState = st => {
   S.loops = st.loops || 0;
   S.nTime = st.time || 0; S.nAt = performance.now(); S.pos = S.nTime;
   S.loading = !!st.loading;
+  S.nStage = st.stage || '';
   const m = S.current;
   if (m && st.duration > 0 && (!m.duration || Math.abs(m.duration - st.duration) > 1.5)) { m.duration = st.duration; if (isSaved(m.id)) persist(); }
   if (st.error && st.error !== S.error) toast(st.error);
@@ -750,6 +779,7 @@ function playAt(i) {
   if (NATIVE) {
     S.loading = true; S.nTime = S.pos; S.nAt = performance.now();
     sendNative({ cmd: 'play', queue: S.queue.map(nativeItem), index: i, repeats: D.repeats });
+    if (!nativeAlive) { clearTimeout(nativeCheckT); nativeCheckT = setTimeout(nativeFallback, 5000); }
     afterStateChange(); return;
   }
   if (!ytReady) { pendingIdx = i; afterStateChange(); toast('Il lettore di YouTube si sta caricando…'); return; }
@@ -900,7 +930,7 @@ function statusText() {
   if (!m) return '';
   if (S.error) return S.error;
   if (S.needsTap) return 'Tocca il video per farlo partire: iPhone lo chiede la prima volta.';
-  if (S.loading) return 'Carico il brano…';
+  if (S.loading) return S.nStage || 'Carico il brano…';
   if (!ytReady) return 'Carico il lettore…';
   if (S.mode === 'chorus' && hasChorus(m)) {
     const n = S.loops + 1;
@@ -1275,10 +1305,7 @@ if (NATIVE) {
   ytReady = true;
   document.body.classList.add('native');
 } else {
-  const ytScript = document.createElement('script');
-  ytScript.src = 'https://www.youtube.com/iframe_api';
-  ytScript.onerror = () => toast('Non riesco a caricare il lettore di YouTube. Controlla la connessione.');
-  document.head.appendChild(ytScript);
+  loadYouTubeAPI();
 }
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(placePlayer));
 })();

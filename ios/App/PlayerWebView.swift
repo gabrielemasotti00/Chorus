@@ -19,12 +19,10 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// La pagina disegna l'interfaccia; l'audio lo suona NativePlayer, che funziona anche a schermo bloccato.
 final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView?
-    private var timer: Timer?
-    private var inBackground = false
-    private var playing = false
-    private var wantsPlaying = false
+    private let audio = NativePlayer()
     private var artworkURL = ""
     private var artwork: MPMediaItemArtwork?
 
@@ -34,12 +32,12 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        config.allowsPictureInPictureMediaPlayback = true
         config.websiteDataStore = .default()
 
         let content = WKUserContentController()
         content.add(WeakScriptHandler(self), name: "ritornello")
-        content.addUserScript(WKUserScript(source: "window.__RITORNELLO_NATIVE__ = true;",
+        let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+        content.addUserScript(WKUserScript(source: "window.__RITORNELLO_NATIVE__ = true; window.__RITORNELLO_VERSION__ = '\(version)';",
                                            injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true))
         config.userContentController = content
@@ -55,9 +53,9 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         if #available(iOS 16.4, *) { wv.isInspectable = true }
         webView = wv
 
+        audio.onState = { [weak self] state in self?.pushState(state) }
         setupRemoteCommands()
-        observeApp()
-        startTimer()
+        observeAudioSession()
         loadApp()
         return wv
     }
@@ -67,44 +65,76 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         webView?.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
     }
 
-    private func js(_ code: String) {
-        webView?.evaluateJavaScript("window.ritornelloNative && window.ritornelloNative.\(code)", completionHandler: nil)
-    }
-
-    // MARK: Messaggi dalla pagina
+    // MARK: Comandi dalla pagina
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
-        case "state": handleState(body)
+        case "cmd": handleCommand(body)
         case "retry": loadApp()
         default: break
         }
     }
 
-    private func handleState(_ b: [String: Any]) {
-        playing = (b["playing"] as? Bool) ?? false
-        wantsPlaying = (b["want"] as? Bool) ?? false
-        let title = (b["title"] as? String) ?? ""
-        let artist = (b["artist"] as? String) ?? ""
-        let duration = (b["duration"] as? NSNumber)?.doubleValue ?? 0
-        let position = (b["position"] as? NSNumber)?.doubleValue ?? 0
-        let art = (b["artwork"] as? String) ?? ""
+    private func number(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
 
+    private func handleCommand(_ b: [String: Any]) {
+        guard let cmd = b["cmd"] as? String else { return }
+        switch cmd {
+        case "play":
+            let items = ((b["queue"] as? [[String: Any]]) ?? []).compactMap { QueueItem(dict: $0) }
+            let index = (b["index"] as? NSNumber)?.intValue ?? 0
+            let repeats = (b["repeats"] as? NSNumber)?.intValue ?? 0
+            audio.play(queue: items, index: index, repeats: repeats)
+        case "pause":
+            audio.pause()
+        case "resume":
+            audio.resume()
+        case "next":
+            audio.advance(1)
+        case "prev":
+            audio.advance(-1)
+        case "seek":
+            audio.seek(to: number(b["t"]) ?? 0)
+        case "mode":
+            audio.setMode((b["mode"] as? String) ?? "full", at: number(b["at"]))
+        case "markers":
+            audio.setMarkers(id: (b["id"] as? String) ?? "",
+                             start: number(b["start"]), end: number(b["end"]), preview: number(b["preview"]))
+        case "repeats":
+            audio.setRepeats((b["n"] as? NSNumber)?.intValue ?? 0)
+        default:
+            break
+        }
+    }
+
+    // MARK: Stato verso la pagina e la schermata di blocco
+
+    private func pushState(_ state: [String: Any]) {
+        updateNowPlaying(state)
+        guard JSONSerialization.isValidJSONObject(state),
+              let data = try? JSONSerialization.data(withJSONObject: state),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.ritornelloNativeState && window.ritornelloNativeState(\(json))",
+                                    completionHandler: nil)
+    }
+
+    private func updateNowPlaying(_ s: [String: Any]) {
+        let title = (s["title"] as? String) ?? ""
         guard !title.isEmpty else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
-            MPMediaItemPropertyArtist: artist,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
-            MPNowPlayingInfoPropertyPlaybackRate: playing ? 1.0 : 0.0
+            MPMediaItemPropertyArtist: (s["artist"] as? String) ?? "",
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: number(s["time"]) ?? 0,
+            MPNowPlayingInfoPropertyPlaybackRate: number(s["rate"]) ?? 0
         ]
-        if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
+        if let d = number(s["duration"]), d > 0 { info[MPMediaItemPropertyPlaybackDuration] = d }
+        let art = (s["thumb"] as? String) ?? ""
         if art == artworkURL, let a = artwork { info[MPMediaItemPropertyArtwork] = a }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-
         if art != artworkURL {
             artworkURL = art
             artwork = nil
@@ -127,7 +157,7 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         }.resume()
     }
 
-    // MARK: Comandi dalla schermata di blocco, cuffie, auto
+    // MARK: Schermata di blocco, Centro di Controllo, cuffie, auto
 
     private func setupRemoteCommands() {
         let c = MPRemoteCommandCenter.shared()
@@ -137,45 +167,22 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         c.nextTrackCommand.isEnabled = true
         c.previousTrackCommand.isEnabled = true
         c.changePlaybackPositionCommand.isEnabled = false
-        c.playCommand.addTarget { [weak self] _ in self?.js("play()"); return .success }
-        c.pauseCommand.addTarget { [weak self] _ in self?.js("pause()"); return .success }
-        c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.js("toggle()"); return .success }
-        c.nextTrackCommand.addTarget { [weak self] _ in self?.js("next()"); return .success }
-        c.previousTrackCommand.addTarget { [weak self] _ in self?.js("prev()"); return .success }
+        c.playCommand.addTarget { [weak self] _ in self?.audio.resume(); return .success }
+        c.pauseCommand.addTarget { [weak self] _ in self?.audio.pause(); return .success }
+        c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.audio.toggle(); return .success }
+        c.nextTrackCommand.addTarget { [weak self] _ in self?.audio.advance(1); return .success }
+        c.previousTrackCommand.addTarget { [weak self] _ in self?.audio.advance(-1); return .success }
     }
 
-    // MARK: Background
-
-    private func observeApp() {
+    private func observeAudioSession() {
         let nc = NotificationCenter.default
-        nc.addObserver(self, selector: #selector(didEnterBackground),
-                       name: UIApplication.didEnterBackgroundNotification, object: nil)
-        nc.addObserver(self, selector: #selector(willEnterForeground),
-                       name: UIApplication.willEnterForegroundNotification, object: nil)
         nc.addObserver(self, selector: #selector(audioInterruption(_:)),
                        name: AVAudioSession.interruptionNotification, object: nil)
         nc.addObserver(self, selector: #selector(routeChange(_:)),
                        name: AVAudioSession.routeChangeNotification, object: nil)
     }
 
-    /// Quando l'app va in background WebKit mette in pausa il video: lo facciamo ripartire subito,
-    /// con la sessione audio attiva continua a suonare solo l'audio.
-    @objc private func didEnterBackground() {
-        inBackground = true
-        guard wantsPlaying else { return }
-        AudioSessionManager.activate()
-        for delay in [0.25, 0.8, 1.6, 3.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self = self, self.inBackground, self.wantsPlaying else { return }
-                self.js("resumeIfWanted()")
-            }
-        }
-    }
-
-    @objc private func willEnterForeground() {
-        inBackground = false
-    }
-
+    /// Dopo una telefonata o un'altra app che ha preso l'audio, riparte se stava suonando.
     @objc private func audioInterruption(_ note: Notification) {
         guard let info = note.userInfo,
               let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -183,10 +190,7 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
               type == .ended else { return }
         let optionsRaw = (info[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
         guard AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume) else { return }
-        DispatchQueue.main.async { [weak self] in
-            AudioSessionManager.activate()
-            self?.js("resumeIfWanted()")
-        }
+        DispatchQueue.main.async { [weak self] in self?.audio.resumeIfWanted() }
     }
 
     /// Cuffie scollegate: pausa, come fa qualsiasi app musicale.
@@ -194,17 +198,7 @@ final class PlayerController: NSObject, WKScriptMessageHandler, WKNavigationDele
         guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
               reason == .oldDeviceUnavailable else { return }
-        DispatchQueue.main.async { [weak self] in self?.js("pause()") }
-    }
-
-    /// In background i timer della pagina rallentano: il controllo del loop lo fa l'app.
-    private func startTimer() {
-        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self = self, self.inBackground, self.wantsPlaying else { return }
-            self.js("tick()")
-        }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        DispatchQueue.main.async { [weak self] in self?.audio.pause() }
     }
 
     // MARK: Navigazione

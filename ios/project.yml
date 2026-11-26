@@ -3,12 +3,18 @@ options:
   bundleIdPrefix: com.ritornello
   deploymentTarget:
     iOS: "16.0"
+packages:
+  YouTubeKit:
+    url: https://github.com/alexeichhorn/YouTubeKit
+    from: "0.4.10"
 targets:
   Ritornello:
     type: application
     platform: iOS
     sources:
       - path: App
+    dependencies:
+      - package: YouTubeKit
     info:
       path: Support/Info.plist
       properties:
@@ -21,10 +27,19 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ritornello.app
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.2"
+        CURRENT_PROJECT_VERSION: "3"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
         ENABLE_BITCODE: NO
+schemes:
+  Ritornello:
+    build:
+      targets:
+        Ritornello: all
+    run:
+      config: Debug
+    archive:
+      config: Release
