@@ -104,7 +104,7 @@ a{color:var(--accent)}
 .mini-prog{height:3px;background:var(--line)}
 .mini-prog i{display:block;height:100%;width:0;background:var(--accent)}
 .mini-in{max-width:640px;margin:0 auto;display:flex;align-items:center;gap:10px;padding:9px 10px 9px 16px}
-.mini-vid{width:96px;height:54px;border-radius:8px;background:#000;flex:none}
+.mini-vid{width:96px;height:54px;border-radius:8px;background:#000 center/cover no-repeat;flex:none}
 .mini-open{flex:1;min-width:0;text-align:left;display:flex;flex-direction:column}
 .mini-open .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px}
 .mini-open .m{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -124,7 +124,7 @@ a{color:var(--accent)}
 .grabber{width:38px;height:5px;border-radius:3px;background:var(--line);margin:8px auto 0}
 .sheet-top{display:flex;align-items:center;justify-content:space-between;padding:2px 0 6px;margin:0 -10px;touch-action:none}
 .ctx{font-size:14px;color:var(--muted);text-align:center;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 8px}
-.video-slot{width:min(100%,calc(32vh * 16 / 9));aspect-ratio:16/9;margin:2px auto 0;border-radius:14px;background:#000}
+.video-slot{width:min(100%,calc(32vh * 16 / 9));aspect-ratio:16/9;margin:2px auto 0;border-radius:14px;background:#000 center/cover no-repeat}
 .sheet-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
 .p-title{font-size:clamp(26px,7.4vw,38px);font-weight:800;letter-spacing:-.03em;line-height:1.06;margin:16px 0 2px;word-break:break-word}
 .p-channel{margin:0 0 8px;color:var(--muted)}
@@ -660,6 +660,30 @@ function openSettings() { $('#key-input').value = D.apiKey || ''; $('#settings')
 
 /* ---------- lettore YouTube ---------- */
 let hiddenAt = 0;
+// Dentro l'app iPhone l'audio lo suona il lettore nativo di iOS (funziona a schermo bloccato)
+const NATIVE = !!(window.__RITORNELLO_NATIVE__ && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ritornello);
+function sendNative(msg) { if (!NATIVE) return; try { window.webkit.messageHandlers.ritornello.postMessage(Object.assign({ type: 'cmd' }, msg)); } catch (_) {} }
+function nativeItem(id) {
+  const m = getMeta(id) || { id, title: 'Video ' + id };
+  return { id, title: m.title || '', artist: m.channel || '', thumb: m.thumb || ('https://i.ytimg.com/vi/' + id + '/mqdefault.jpg'),
+    start: hasChorus(m) ? m.start : null, end: hasChorus(m) ? m.end : null };
+}
+window.ritornelloNativeState = st => {
+  if (!NATIVE || !st || typeof st.index !== 'number' || st.index < 0) return;
+  const qi = S.queue.indexOf(st.id);
+  if (qi >= 0) S.qi = qi;
+  if (!S.current || S.current.id !== st.id) S.current = getMeta(st.id) || S.current;
+  S.playing = !!st.playing; S.ytState = S.playing ? 1 : 2;
+  S.mode = st.mode === 'chorus' ? 'chorus' : 'full';
+  S.loops = st.loops || 0;
+  S.nTime = st.time || 0; S.nAt = performance.now(); S.pos = S.nTime;
+  S.loading = !!st.loading;
+  const m = S.current;
+  if (m && st.duration > 0 && (!m.duration || Math.abs(m.duration - st.duration) > 1.5)) { m.duration = st.duration; if (isSaved(m.id)) persist(); }
+  if (st.error && st.error !== S.error) toast(st.error);
+  S.error = st.error || '';
+  afterStateChange();
+};
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') hiddenAt = performance.now(); });
 let player = null, ytReady = false, pendingIdx = null, tapT = null, seekGuard = 0, lastRawT = -1, lastRawAt = 0;
 window.onYouTubeIframeAPIReady = () => {
@@ -673,9 +697,10 @@ window.onYouTubeIframeAPIReady = () => {
     }
   });
 };
-function ytState() { try { return player && ytReady ? player.getPlayerState() : -1; } catch (_) { return -1; } }
+function ytState() { if (NATIVE) return S.playing ? 1 : 2; try { return player && ytReady ? player.getPlayerState() : -1; } catch (_) { return -1; } }
 // il player aggiorna il tempo a scatti: tra un aggiornamento e l'altro lo stimo
 function ytTime() {
+  if (NATIVE) return S.playing ? (S.nTime || 0) + Math.min(1, (performance.now() - (S.nAt || 0)) / 1000) : (S.nTime || 0);
   let raw = 0;
   try { raw = player && ytReady ? (player.getCurrentTime() || 0) : 0; } catch (_) { return 0; }
   const now = performance.now();
@@ -683,8 +708,8 @@ function ytTime() {
   if (S.ytState === 1) return raw + Math.min(0.5, (now - lastRawAt) / 1000);
   return raw;
 }
-function ytDur() { try { return player && ytReady ? (player.getDuration() || 0) : 0; } catch (_) { return 0; } }
-function seek(t) { try { player.seekTo(t, true); seekGuard = performance.now() + 600; S.pos = t; lastRawT = -1; } catch (_) {} }
+function ytDur() { if (NATIVE) return (S.current && S.current.duration) || 0; try { return player && ytReady ? (player.getDuration() || 0) : 0; } catch (_) { return 0; } }
+function seek(t) { if (NATIVE) { sendNative({ cmd: 'seek', t }); S.nTime = t; S.nAt = performance.now(); S.pos = t; return; } try { player.seekTo(t, true); seekGuard = performance.now() + 600; S.pos = t; lastRawT = -1; } catch (_) {} }
 // carica il brano; nel ritornello YouTube si ferma da solo alla fine (rete di sicurezza per il background)
 function loadCurrent(at, withEnd) {
   const m = S.current;
@@ -697,6 +722,11 @@ function loadCurrent(at, withEnd) {
 function setMode(mode, at) {
   const m = S.current;
   if (!m) return;
+  if (NATIVE) {
+    S.mode = (mode === 'chorus' && hasChorus(m)) ? 'chorus' : 'full'; S.loops = 0;
+    sendNative({ cmd: 'mode', mode: S.mode, at: at != null ? at : null });
+    afterStateChange(); return;
+  }
   S.mode = mode; S.loops = 0; S.wantPlaying = true;
   if (mode === 'chorus' && hasChorus(m)) loadCurrent(at != null ? at : m.start, true);
   else { S.mode = 'full'; loadCurrent(at != null ? at : ytTime(), false); }
@@ -717,6 +747,11 @@ function playAt(i) {
   S.current = m; S.loops = 0; S.error = ''; S.needsTap = false; S.wantPlaying = true;
   S.mode = hasChorus(m) ? 'chorus' : 'full';
   S.pos = S.mode === 'chorus' ? m.start : 0;
+  if (NATIVE) {
+    S.loading = true; S.nTime = S.pos; S.nAt = performance.now();
+    sendNative({ cmd: 'play', queue: S.queue.map(nativeItem), index: i, repeats: D.repeats });
+    afterStateChange(); return;
+  }
   if (!ytReady) { pendingIdx = i; afterStateChange(); toast('Il lettore di YouTube si sta caricando…'); return; }
   loadCurrent(S.mode === 'chorus' ? m.start : 0, S.mode === 'chorus');
   clearTimeout(tapT);
@@ -729,6 +764,7 @@ function playAt(i) {
 function nextSong() { if (S.queue.length) playAt(S.qi + 1); }
 function prevSong() { if (S.queue.length) playAt(S.qi - 1); }
 function togglePlay() {
+  if (NATIVE) { if (S.current) sendNative({ cmd: S.playing ? 'pause' : 'resume' }); return; }
   if (!S.current || !ytReady) return;
   const st = ytState();
   try {
@@ -782,6 +818,7 @@ function onYTError(e) {
   afterStateChange();
 }
 function tick() {
+  if (NATIVE) { if (S.current) { S.pos = ytTime(); updateLive(); } return; }
   if (!ytReady || !S.current) return;
   const st = ytState();
   const t = ytTime();
@@ -800,7 +837,7 @@ setInterval(tick, 50);
 const nativeBridge = (window.__RITORNELLO_NATIVE__ && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ritornello) || null;
 let lastPost = 0;
 function postNative(force) {
-  if (!nativeBridge) return;
+  if (!nativeBridge || NATIVE) return;
   const now = performance.now();
   if (!force && now - lastPost < 1000) return;
   lastPost = now;
@@ -836,6 +873,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 /* ---------- posizionamento del video ---------- */
 function placePlayer() {
   const w = $('#yt-wrap');
+  if (NATIVE) { w.style.left = '-9999px'; return; }
   let target = null;
   if (S.current) target = S.sheetOpen ? $('#video-slot') : $('#mini-vid');
   const r = target && target.getBoundingClientRect();
@@ -862,6 +900,7 @@ function statusText() {
   if (!m) return '';
   if (S.error) return S.error;
   if (S.needsTap) return 'Tocca il video per farlo partire: iPhone lo chiede la prima volta.';
+  if (S.loading) return 'Carico il brano…';
   if (!ytReady) return 'Carico il lettore…';
   if (S.mode === 'chorus' && hasChorus(m)) {
     const n = S.loops + 1;
@@ -872,8 +911,16 @@ function statusText() {
   if (!hasChorus(m)) return 'Ascolta e tocca Inizio qui e Fine qui sul ritornello.';
   return S.playing ? 'Brano intero' : 'Brano intero, in pausa';
 }
+function setArt(m) {
+  if (!NATIVE) return;
+  const big = m ? 'url("https://i.ytimg.com/vi/' + m.id + '/hqdefault.jpg")' : '';
+  const small = m ? 'url("' + (m.thumb || ('https://i.ytimg.com/vi/' + m.id + '/mqdefault.jpg')) + '")' : '';
+  if ($('#video-slot').style.backgroundImage !== big) $('#video-slot').style.backgroundImage = big;
+  if ($('#mini-vid').style.backgroundImage !== small) $('#mini-vid').style.backgroundImage = small;
+}
 function renderMini() {
   const m = S.current, mini = $('#mini');
+  setArt(m);
   if (!m) { mini.hidden = true; document.body.classList.remove('has-mini'); return; }
   mini.hidden = false; document.body.classList.add('has-mini');
   setText($('#mini-title'), m.title);
@@ -970,7 +1017,10 @@ function setMarkers(st, en, which) {
   m.end = en == null ? null : r2(en);
   S.current = m;
   persist();
-  if (hasChorus(m) && S.mode === 'chorus') {
+  if (NATIVE) {
+    const prev = hasChorus(m) && S.mode === 'chorus' ? (which === 'end' ? Math.max(m.start, m.end - 2.5) : which === 'start' ? m.start : null) : null;
+    sendNative({ cmd: 'markers', id: m.id, start: hasChorus(m) ? m.start : null, end: hasChorus(m) ? m.end : null, preview: prev });
+  } else if (hasChorus(m) && S.mode === 'chorus') {
     if (which === 'end') loadCurrent(Math.max(m.start, m.end - 2.5), true);
     else if (which === 'start') { seek(m.start); if (ytState() !== 1) { try { player.playVideo(); } catch (_) {} } }
   }
@@ -1093,6 +1143,7 @@ async function songMenu(id, ctx) {
     D.songs[id].title = name; persist(); render(); renderPlayer();
   } else if (v === 'clear') {
     m.start = null; m.end = null;
+    sendNative({ cmd: 'markers', id, start: null, end: null, preview: null });
     persist(); render();
     if (S.current && S.current.id === id) setMode('full'); else afterStateChange();
   } else if (v === 'delete') {
@@ -1150,7 +1201,7 @@ document.addEventListener('click', e => {
   if (d.openPl) { S.plId = d.openPl; S.view = 'playlist'; render(); window.scrollTo(0, 0); return; }
   if (d.plMore) { playlistMenu(d.plMore); return; }
   if (d.rep !== undefined) {
-    D.repeats = parseInt(d.rep, 10) || 0; S.loops = 0; persist(); renderPlayer(); return;
+    D.repeats = parseInt(d.rep, 10) || 0; S.loops = 0; persist(); sendNative({ cmd: 'repeats', n: D.repeats }); renderPlayer(); return;
   }
 });
 $('#go-search').onclick = doSearch;
@@ -1220,10 +1271,15 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.sheetOpe
 /* ---------- avvio ---------- */
 document.querySelectorAll('[data-icon]').forEach(el => el.insertAdjacentHTML('afterbegin', I[el.dataset.icon]));
 render();
-const ytScript = document.createElement('script');
-ytScript.src = 'https://www.youtube.com/iframe_api';
-ytScript.onerror = () => toast('Non riesco a caricare il lettore di YouTube. Controlla la connessione.');
-document.head.appendChild(ytScript);
+if (NATIVE) {
+  ytReady = true;
+  document.body.classList.add('native');
+} else {
+  const ytScript = document.createElement('script');
+  ytScript.src = 'https://www.youtube.com/iframe_api';
+  ytScript.onerror = () => toast('Non riesco a caricare il lettore di YouTube. Controlla la connessione.');
+  document.head.appendChild(ytScript);
+}
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(placePlayer));
 })();
 </script>
